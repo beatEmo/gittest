@@ -1,0 +1,423 @@
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+
+interface Props {
+  data?: any
+  jsonString?: string
+  compareData?: any
+  compareJsonString?: string
+  theme?: 'dark' | 'light'
+}
+
+const props = defineProps<Props>()
+
+// 计算格式化后的JSON数据行
+const lines = computed(() => {
+  let jsonData: any
+  let compareJsonData: any
+  
+  // 解析主要数据
+  if (props.jsonString) {
+    try {
+      jsonData = JSON.parse(props.jsonString)
+    } catch (error) {
+      console.error('Invalid JSON string:', error)
+      return ['Invalid JSON string']
+    }
+  } else {
+    jsonData = props.data
+  }
+
+  // 解析对比数据
+  if (props.compareJsonString) {
+    try {
+      compareJsonData = JSON.parse(props.compareJsonString)
+    } catch (error) {
+      console.error('Invalid compare JSON string:', error)
+    }
+  } else {
+    compareJsonData = props.compareData
+  }
+
+  const jsonStr = JSON.stringify(jsonData, null, 2)
+  const compareJsonStr = compareJsonData ? JSON.stringify(compareJsonData, null, 2) : null
+
+  // 如果有对比数据，计算差异
+  if (compareJsonStr) {
+    const mainLines = jsonStr.split('\n')
+    const compareLines = compareJsonStr.split('\n')
+    const diffResult = computeDiff(mainLines, compareLines)
+    return mainLines.map((line, index) => ({
+      text: line,
+      status: diffResult[index] || 'unchanged'
+    }))
+  }
+
+  // 如果没有对比数据，返回原始行
+  return jsonStr.split('\n').map(line => ({
+    text: line,
+    status: 'unchanged'
+  }))
+})
+
+// 计算两个JSON文本的差异
+const computeDiff = (mainLines: string[], compareLines: string[]): Record<number, 'added' | 'removed' | 'modified'> => {
+  const result: Record<number, 'added' | 'removed' | 'modified'> = {}
+  const mainMap = new Map<string, number[]>()
+  const compareMap = new Map<string, number[]>()
+
+  // 构建行内容到行号的映射
+  mainLines.forEach((line, index) => {
+    const key = line.trim()
+    const indices = mainMap.get(key) || []
+    indices.push(index)
+    mainMap.set(key, indices)
+  })
+
+  compareLines.forEach((line, index) => {
+    const key = line.trim()
+    const indices = compareMap.get(key) || []
+    indices.push(index)
+    compareMap.set(key, indices)
+  })
+
+  // 标记删除的行
+  mainLines.forEach((line, index) => {
+    const key = line.trim()
+    if (!compareMap.has(key)) {
+      result[index] = 'removed'
+    }
+  })
+
+  // 标记新增的行
+  compareLines.forEach((line, index) => {
+    const key = line.trim()
+    if (!mainMap.has(key)) {
+      // 找到最近的未修改行的位置
+      const nearestIndex = findNearestUnchangedLine(index, mainLines, result)
+      if (nearestIndex !== -1) {
+        result[nearestIndex] = 'added'
+      }
+    }
+  })
+
+  // 标记修改的行
+  mainLines.forEach((line, index) => {
+    if (!result[index]) {
+      const mainKey = line.trim()
+      const mainIndent = getIndentLevel(line)
+      const compareIndices = compareMap.get(mainKey) || []
+
+      if (compareIndices.length === 0) {
+        // 检查是否有相同缩进级别但内容不同的行
+        const similarLines = compareLines.filter((compareLine, compareIndex) => 
+          getIndentLevel(compareLine) === mainIndent && 
+          !mainMap.has(compareLine.trim())
+        )
+
+        if (similarLines.length > 0) {
+          result[index] = 'modified'
+        }
+      }
+    }
+  })
+
+  return result
+}
+
+// 找到最近的未修改行
+const findNearestUnchangedLine = (compareIndex: number, mainLines: string[], diffResult: Record<number, string>): number => {
+  const mainIndent = getIndentLevel(mainLines[compareIndex] || '')
+  
+  // 向后查找
+  for (let i = compareIndex; i < mainLines.length; i++) {
+    if (!diffResult[i] && getIndentLevel(mainLines[i]) === mainIndent) {
+      return i
+    }
+  }
+
+  // 向前查找
+  for (let i = compareIndex - 1; i >= 0; i--) {
+    if (!diffResult[i] && getIndentLevel(mainLines[i]) === mainIndent) {
+      return i
+    }
+  }
+
+  return -1
+}
+
+// 存储每行的折叠状态
+const foldedLines = ref<Set<number>>(new Set())
+const isArrowColumnHovered = ref(false)
+
+// 切换折叠状态
+const toggleFold = (lineNumber: number) => {
+  if (foldedLines.value.has(lineNumber)) {
+    foldedLines.value.delete(lineNumber)
+  } else {
+    foldedLines.value.add(lineNumber)
+  }
+}
+
+// 判断是否可以折叠（包含对象或数组的行）
+const canFold = (line: string): boolean => {
+  const trimmed = typeof line === 'string' ? line.trim() : line.text.trim()
+  return trimmed.endsWith('{') || trimmed.endsWith('[')
+}
+
+// 获取缩进级别
+const getIndentLevel = (line: string): number => {
+  const match = line.match(/^\s*/)
+  return match ? match[0].length / 2 : 0
+}
+
+// 判断是否应该显示该行（基于折叠状态）
+const shouldShowLine = (lineNumber: number, line: any): boolean => {
+  const lineText = typeof line === 'string' ? line : line.text
+  const currentIndent = getIndentLevel(lineText)
+  
+  // 检查所有折叠的行
+  for (const foldedLine of Array.from(foldedLines.value)) {
+    if (foldedLine < lineNumber && 
+        getIndentLevel(typeof lines.value[foldedLine] === 'string' ? 
+          lines.value[foldedLine] : 
+          lines.value[foldedLine].text) < currentIndent &&
+        isSameParent(foldedLine, lineNumber)) {
+      return false
+    }
+  }
+  
+  return true
+}
+
+// 判断两行是否属于同一个父级
+const isSameParent = (foldedLine: number, currentLine: number): boolean => {
+  const foldedLineText = typeof lines.value[foldedLine] === 'string' ? 
+    lines.value[foldedLine] : 
+    lines.value[foldedLine].text
+  const foldedIndent = getIndentLevel(foldedLineText)
+  
+  // 检查折叠行和当前行之间的所有行
+  for (let i = foldedLine + 1; i < currentLine; i++) {
+    const lineText = typeof lines.value[i] === 'string' ? 
+      lines.value[i] : 
+      lines.value[i].text
+    const lineIndent = getIndentLevel(lineText)
+    // 如果在折叠行和当前行之间发现了一个更低或相等缩进级别的行
+    // 说明当前行不属于被折叠行的子元素
+    if (lineIndent <= foldedIndent) {
+      return false
+    }
+  }
+  return true
+}
+
+// JSON语法高亮处理
+const highlightLine = (line: string) => {
+  const parts = []
+  let remaining = line
+
+  // 匹配属性名
+  const propertyMatch = remaining.match(/^\s*"([^"]+)"\s*:/) 
+  if (propertyMatch) {
+    parts.push({ type: 'property', text: propertyMatch[0] })
+    remaining = remaining.slice(propertyMatch[0].length)
+  }
+
+  // 匹配字符串值
+  const stringMatch = remaining.match(/^\s*"([^"]*)"/) 
+  if (stringMatch) {
+    parts.push({ type: 'string', text: stringMatch[0] })
+    remaining = remaining.slice(stringMatch[0].length)
+  }
+
+  // 匹配数字
+  const numberMatch = remaining.match(/^\s*-?\d+(\.\d+)?/)
+  if (numberMatch) {
+    parts.push({ type: 'number', text: numberMatch[0] })
+    remaining = remaining.slice(numberMatch[0].length)
+  }
+
+  // 匹配布尔值和null
+  const keywordMatch = remaining.match(/^\s*(true|false|null)/)
+  if (keywordMatch) {
+    parts.push({ type: 'keyword', text: keywordMatch[0] })
+    remaining = remaining.slice(keywordMatch[0].length)
+  }
+
+  // 处理剩余的标点符号
+  if (remaining) {
+    parts.push({ type: 'punctuation', text: remaining })
+  }
+
+  return parts
+}
+</script>
+
+<template>
+  <div class="json-viewer" :class="theme">
+    <div class="json-content">
+      <div
+        v-for="(line, index) in lines"
+        :key="index"
+        class="json-line"
+        :class="{ 
+          'hidden': !shouldShowLine(index, line),
+          'added': line.status === 'added',
+          'removed': line.status === 'removed',
+          'modified': line.status === 'modified'
+        }"
+      >
+        <!-- 行号列 -->
+        <div class="line-number">{{ index + 1 }}</div>
+        
+        <!-- 折叠箭头列 -->
+        <div class="fold-arrow" 
+             @click="toggleFold(index)" 
+             @mouseover="isArrowColumnHovered = true" 
+             @mouseleave="isArrowColumnHovered = false">
+          <span v-if="canFold(line)" class="arrow"
+                :class="{ 'folded': foldedLines.has(index), 'visible': foldedLines.has(index) || isArrowColumnHovered }">
+            ▼
+          </span>
+          <span v-else class="placeholder"></span>
+        </div>
+        
+        <!-- JSON内容列 -->
+        <div class="line-content" :style="{ '--indent-level': getIndentLevel(typeof line === 'string' ? line : line.text) }">
+          <template v-for="(part, i) in highlightLine(typeof line === 'string' ? line.trim() : line.text.trim())" :key="i">
+            <span :class="part.type">{{ part.text }}</span>
+          </template>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.json-viewer {
+  font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+  padding: 1rem;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+
+.json-viewer.dark {
+  background-color: #1e1e1e;
+  color: #d4d4d4;
+}
+
+.json-viewer.light {
+  background-color: #ffffff;
+  color: #000000;
+}
+
+.json-content {
+  display: table;
+  width: 100%;
+}
+
+.json-line {
+  display: table-row;
+  height: 1.5em;
+}
+
+.json-line.hidden {
+  display: none;
+}
+
+.json-line.added {
+  background-color: rgba(0, 255, 0, 0.1);
+}
+
+.json-line.removed {
+  background-color: rgba(255, 0, 0, 0.1);
+}
+
+.json-line.modified {
+  background-color: rgba(255, 165, 0, 0.1);
+}
+
+.line-number {
+  display: table-cell;
+  text-align: right;
+  padding-right: 1em;
+  color: #858585;
+  user-select: none;
+  width: 3em;
+}
+
+.fold-arrow {
+  display: table-cell;
+  width: 2em;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.arrow {
+  display: inline-block;
+  transition: all 0.2s;
+  opacity: 0;
+}
+
+.arrow.visible {
+  opacity: 1;
+}
+
+.arrow.folded {
+  transform: rotate(-90deg);
+}
+
+.placeholder {
+  display: inline-block;
+  width: 1em;
+}
+
+.line-content {
+  display: table-cell;
+  white-space: pre;
+  padding-left: calc(var(--indent-level) * 1.5em);
+  text-align: left;
+}
+
+.json-viewer.dark .line-content .property {
+  color: #9cdcfe;
+}
+
+.json-viewer.dark .line-content .string {
+  color: #ce9178;
+}
+
+.json-viewer.dark .line-content .number {
+  color: #b5cea8;
+}
+
+.json-viewer.dark .line-content .keyword {
+  color: #569cd6;
+}
+
+.json-viewer.dark .line-content .punctuation {
+  color: #d4d4d4;
+}
+
+.json-viewer.light .line-content .property {
+  color: #0451a5;
+}
+
+.json-viewer.light .line-content .string {
+  color: #a31515;
+}
+
+.json-viewer.light .line-content .number {
+  color: #098658;
+}
+
+.json-viewer.light .line-content .keyword {
+  color: #0000ff;
+}
+
+.json-viewer.light .line-content .punctuation {
+  color: #000000;
+}
+</style>
